@@ -13,4 +13,10 @@ pip install boto3
 $mydir/bin/python3 $mydir/test_rgw_d4n.py
 
 deactivate
+
+ceph_test_rgw_d4n_directory
+ceph_test_rgw_d4n_policy
+ceph_test_rgw_redis_driver
+ceph_test_rgw_ssd_driver
+
 echo OK.
