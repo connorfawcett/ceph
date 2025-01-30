@@ -440,7 +440,7 @@ namespace ECLegacy {
       ScrubMapBuilder &pos,
       ScrubMap::object &o);
 
-    uint64_t be_get_ondisk_size(uint64_t logical_size) const {
+    uint64_t be_get_ondisk_size(uint64_t logical_size, int8_t shard_id) const {
       return sinfo.logical_to_next_chunk_offset(logical_size);
     }
   };
