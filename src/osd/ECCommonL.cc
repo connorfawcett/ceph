@@ -328,7 +328,6 @@ void ECCommonL::ReadPipeline::get_min_want_to_read_shards(
   const uint64_t offset,
   const uint64_t length,
   const ECUtilL::stripe_info_t& sinfo,
-  const vector<int>& chunk_mapping,
   set<int> *want_to_read)
 {
   const auto [left_chunk_index, right_chunk_index] =
