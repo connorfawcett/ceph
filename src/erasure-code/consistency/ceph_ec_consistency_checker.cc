@@ -73,8 +73,8 @@ int main(int argc, char **argv)
   guard.emplace(boost::asio::make_work_guard(asio));
   thread = make_named_thread("io_thread",[&asio] { asio.run(); });
 
-  auto checker = ceph::consistency::ConsistencyChecker(rados, asio, pool);
-  checker.single_read_and_check_consistency(oid, blocksize, offset, length, stripe_unit);
+  auto checker = ceph::consistency::ConsistencyChecker(rados, asio, pool, stripe_unit);
+  checker.single_read_and_check_consistency(oid, blocksize, offset, length);
   checker.print_results(std::cout);
 
   exit(0);

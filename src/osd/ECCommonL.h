@@ -331,6 +331,7 @@ struct ECCommonL {
     void create_parity_read_buffer(
       std::map<int, bufferlist> to_decode,
       std::set<int> wanted_to_read,
+      uint64_t read_size,
       bufferlist *outbl
       );
 

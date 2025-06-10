@@ -523,33 +523,39 @@ void ECCommonL::ReadPipeline::get_want_to_read_all_shards(
 void ECCommonL::ReadPipeline::create_parity_read_buffer(
   std::map<int, bufferlist> to_decode,
   std::set<int> wanted_to_read,
+  uint64_t read_size,
   bufferlist *outbl)
 {
-  int k_plus_m = (int)sinfo.get_k_plus_m();
-  int k = (int)sinfo.get_k();
-  bufferlist parity;
+  bufferlist data, parity;
+  std::map<int, bufferlist> parities;
 
-  ceph_assert((int)to_decode.size() == k_plus_m);
-  ceph_assert((int)wanted_to_read.size() == k_plus_m);
+  for (unsigned int i = 0; i < sinfo.get_k_plus_m(); ++i) {
+    unsigned int raw_shard = sinfo.get_raw_shard(i);
+    if (raw_shard >= sinfo.get_k()) {
+      parities[raw_shard] = to_decode[i];
+      wanted_to_read.erase(i);
+      to_decode.erase(i);
+    }
+  }
 
-  for (int i = k; i < k_plus_m; i++) {
-    parity.append(to_decode[i]);
-    wanted_to_read.erase(i);
-    to_decode.erase(i);
+  for (auto const& p : parities) {
+    parity.append(p.second);
   }
 
   dout(20) << __func__ << " going to decode: "
-            << " wanted_to_read=" << wanted_to_read
-            << " to_decode=" << to_decode
-            << dendl;
+           << " wanted_to_read=" << wanted_to_read
+           << " to_decode=" << to_decode
+           << dendl;
   int r = ECUtilL::decode(
     sinfo,
     ec_impl,
     wanted_to_read,
     to_decode,
-    outbl);
+    &data);
 
   ceph_assert(r == 0);
+
+  outbl->append(data);
   outbl->append(parity);
 }
 
@@ -591,7 +597,10 @@ struct ClientReadCompleter : ECCommonL::ReadCompleter {
       if (cct->_conf->bluestore_debug_inject_read_err &&
           ECInject::test_parity_read(hoid)) {
         bufferlist outbl;
-        read_pipeline.create_parity_read_buffer(to_decode, wanted_to_read, &outbl);
+        read_pipeline.create_parity_read_buffer(to_decode,
+                                                wanted_to_read,
+                                                read.size,
+                                                &outbl);
 
         result.insert(
           read.offset, outbl.length(), std::move(outbl));
