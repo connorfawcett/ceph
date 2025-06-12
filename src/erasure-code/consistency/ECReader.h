@@ -10,7 +10,23 @@
 
 namespace ceph {
   namespace consistency {
-    typedef std::pair<std::string, ceph::bufferlist> ReadResult;
+    class ReadResult {
+      public:
+        std::string get_oid() const { return oid; }
+        boost::system::error_code get_ec() const { return ec; }
+        ceph::bufferlist get_data() const { return data; }
+        ReadResult(std::string oid,
+          boost::system::error_code ec,
+          ceph::bufferlist data) :
+        oid(oid),
+        ec(ec),
+        data(data) {}
+      protected:
+        std::string oid;
+        boost::system::error_code ec;
+        ceph::bufferlist data;
+    };
+
     class Read {
       protected:
         std::string oid;

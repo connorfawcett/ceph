@@ -45,19 +45,41 @@ bool ConsistencyChecker::single_read_and_check_consistency(const std::string& oi
                                                            int length)
 {
   clear_results();
+  std::string error_message = "";
+  bool success = true;
+
   auto read = Read(oid, block_size, offset, length);
   queue_ec_read(read);
 
   auto read_results = reader.get_results();
-  ceph_assert(read_results->size() == 1);
+  int result_count = read_results->size();
+  if (result_count != 1) {
+    error_message = "Incorrect number of RADOS read results returned, count: "
+                    + std::to_string(result_count);
+    success = false;
+  }
 
-  ReadResult res = (*read_results)[0];
+  ReadResult read_result = (*read_results)[0];
+  boost::system::error_code ec = read_result.get_ec();
+  if (success && ec != boost::system::errc::success) {
+    error_message = "RADOS Read failed, error message: " + ec.message();
+    success = false;
+  }
 
-  bool is_consistent = check_object_consistency(res.first, res.second);
-  results.push_back(ConsistencyCheckResult(oid, is_consistent));
+  if (success && read_result.get_data().length() == 0) {
+    error_message = "Empty object returned from RADOS read.";
+    success = false;
+  }
+
+  if(success && !check_object_consistency(oid, read_result.get_data())) {
+    error_message = "Generated parity did not match read in parity shards.";
+    success = false;
+  }
+
+  results.push_back({oid, error_message, success});
   commands.inject_clear_parity_read_on_primary_osd(pool.get_pool_name(),
                                                    oid);
-  return is_consistent;
+  return success;
 }
 
 /**
@@ -97,11 +119,17 @@ void ConsistencyChecker::print_results(std::ostream& out)
 {
   out << "Results:" << std::endl;
   for (auto r : results) {
-    std::string result_str = (r.second) ? "Passed" : "Failed";
-    out << "Object ID " << r.first << ": " << result_str << std::endl;
+    std::string result_str = (r.get_result()) ? "Passed" : "Failed";
+    std::string error_str = r.get_error_message();
+    out << "Object ID " << r.get_oid() << ": " << result_str << std::endl;
+    if (!error_str.empty()) {
+      out << "Error Message: " << error_str << std::endl;
+    }
   }
+
   int count = results.size();
-  out << "Total: " << count << " objects checked." << std::endl;
+  std::string obj_str = (count == 1) ? "object checked." : "objects checked.";
+  out << "Total: " << count << " " << obj_str << std::endl;
 }
 
 std::pair<bufferlist, bufferlist>

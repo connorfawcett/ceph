@@ -16,7 +16,23 @@
 
 namespace ceph {
   namespace consistency {
-    typedef std::pair<std::string, bool> ConsistencyCheckResult;
+    class ConsistencyCheckResult {
+      public:
+        std::string get_oid() const { return oid; }
+        std::string get_error_message() const { return error_message; }
+        bool get_result() const { return result; }
+        ConsistencyCheckResult(std::string oid,
+                               std::string error_message,
+                               bool result) :
+          oid(oid),
+          error_message(error_message),
+          result(result) {}
+      protected:
+        std::string oid;
+        std::string error_message;
+        bool result;
+    };
+
     class ConsistencyChecker {
       protected:
         librados::Rados& rados;

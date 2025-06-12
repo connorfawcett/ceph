@@ -92,10 +92,7 @@ void ECReader::do_read(Read read)
   auto read_cb = [&, oid](boost::system::error_code ec,
                          version_t ver,
                          bufferlist outbl) {
-    ceph_assert(ec == boost::system::errc::success);
-    ceph_assert(outbl.length() > 0);
-
-    results.push_back({oid, outbl});
+    results.push_back({oid, ec, outbl});
     finish_io();
   };
 
