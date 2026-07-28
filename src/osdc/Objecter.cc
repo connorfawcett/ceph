@@ -3075,10 +3075,10 @@ int Objecter::_calc_target(op_target_t *t, snapid_t snap, bool any_change)
           // PG is migrating - check watermark
           const auto& iter = pool_migration_watermarks.find(actual_pgid);
           if (iter != pool_migration_watermarks.end()) {
-            if (t->get_hobj(pgid, snap) < iter->second) {
-              // object has been migrated
-              migrated = true;
-            }
+            hobject_t hobj = t->get_hobj(pgid, snap);
+            migrated = hobj.is_snap() ?
+                       hobj.get_head() < iter->second.get_head() :
+                       hobj < iter->second;
           }
         } // else: PG has not started migration
       }
@@ -3864,7 +3864,9 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
       for (auto it = s->ops.begin(); it != s->ops.end(); ) {
         if (it->second->target.actual_pgid.pgid == m->get_pg()) {
           auto hobj = it->second->target.get_hobj(it->second->target.pgid, it->second->snapid);
-          if ((previous_watermark <= hobj) && (hobj < new_watermark)) {
+          if (hobj.is_snap() ?
+              previous_watermark.get_head() <= hobj.get_head() && hobj.get_head() < new_watermark.get_head() :
+              previous_watermark <= hobj && hobj < new_watermark) {
             ldout(cct, 20) << __func__ << " found for retrying " << it->second->tid << " " <<it->second->target.get_hobj() << dendl;
             if (it->second->has_completion())
               num_in_flight--;
