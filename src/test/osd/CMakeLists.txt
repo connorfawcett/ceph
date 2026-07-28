@@ -45,6 +45,20 @@ install(TARGETS
   ceph_test_osd_stale_read
   DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# test_ec_snap_migration_redirect
+add_executable(ceph_test_ec_snap_migration_redirect
+  ceph_test_ec_snap_migration_redirect.cc
+  )
+target_link_libraries(ceph_test_ec_snap_migration_redirect
+  librados
+  global
+  ${CMAKE_DL_LIBS}
+  ${EXTRALIBS}
+  )
+install(TARGETS
+  ceph_test_ec_snap_migration_redirect
+  DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 # scripts
 add_ceph_test(safe-to-destroy.sh ${CMAKE_CURRENT_SOURCE_DIR}/safe-to-destroy.sh)
 
