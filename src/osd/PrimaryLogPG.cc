@@ -13889,6 +13889,7 @@ void PrimaryLogPG::_on_activate_committed(HBHandle *handle)
 
   pool_migrations_in_flight.clear();
   pool_migration_clones_in_flight.clear();
+  pool_migration_copied_clones.clear();
   new_pool_migration_interval_in_flight = false;
 
   if (pool.info.is_pg_migrating(info.pgid.pgid)) {
@@ -15744,8 +15745,42 @@ struct C_Migrate : public Context {
       if (oid.is_snap()) {
         // Abandon migrating head object as well
         auto head = oid.get_head();
+
+        // Clean up any sibling clones whose copies completed and were waiting
+        // for a batch delete.  Since the migration failed they must stay in the
+        // source pool and their in-flight entries must be released so the
+        // degraded-object waiters can be re-queued back to the source pool.
+        auto copied_clones_it = pg->pool_migration_copied_clones.find(head);
+        if (copied_clones_it != pg->pool_migration_copied_clones.end()) {
+          for (const auto &copied_clone : copied_clones_it->second) {
+            pg->pool_migrations_in_flight.erase(copied_clone);
+            auto recovering_it = pg->recovering.find(copied_clone);
+            if (recovering_it != pg->recovering.end()) {
+              pg->recovering.erase(recovering_it);
+              pg->finish_recovery_op(copied_clone);
+            }
+          }
+          pg->pool_migration_copied_clones.erase(copied_clones_it);
+        }
+
         pg->recovering.erase(head);
         pg->pool_migrations_in_flight.erase(head);
+
+        // Re-queue all clone I/Os that were waiting for the head migration to
+        // complete.  Since migration failed, the clones remain in the source
+        // pool and ops should be served there.
+        for (auto it = pg->waiting_for_degraded_object.begin();
+             it != pg->waiting_for_degraded_object.end(); ) {
+          if (it->first.is_snap() && it->first.get_head() == head) {
+            ldpp_dout(pg, 20) << "C_Migrate::finish re-queuing snap waiters on "
+                              << it->first << " (migration failed)" << dendl;
+            pg->requeue_ops(it->second);
+            it = pg->waiting_for_degraded_object.erase(it);
+          } else {
+            ++it;
+          }
+        }
+
         // handle_pool_migration_copy_failure already checked for quiesce
         // completion, but it ran before we removed the head here.  Check
         // again now that the set may be empty.
@@ -15756,17 +15791,42 @@ struct C_Migrate : public Context {
         }
       }
     } else if (action == COPY_DELETE_NEXT) {
-      // Object copied to target pool, now delete from source pool
-      pg->pool_migration_source_start_delete(oid);
       if (oid.is_snap()) {
-        // Check if head is waiting to be deleted
+        // Clone copy done – defer source-pool deletion until all clones and
+        // the head for this object have been copied.  Only then do we delete
+        // them all at once so the watermark fast-forwards past the entire
+        // object group in one atomic step.
         auto head = oid.get_head();
-        ceph_assert(pg->pool_migration_clones_in_flight.count(head));
-        if (--pg->pool_migration_clones_in_flight[head] == 0) {
-          pg->pool_migration_source_start_delete_head(head);
+        if (!pg->pool_migration_clones_in_flight.count(head)) {
+          // pool_migration_source_start_delete_head already ran (another clone
+          // completed first and the batch delete is underway).  Just add this
+          // clone to the copies-done set so it is included in a future batch if
+          // the head is still pending, or fall back to an immediate delete.
+          if (pg->pool_migration_copied_clones.count(head)) {
+            ldpp_dout(pg, 20) << "C_Migrate::finish batch-delete pending, adding late clone "
+                              << oid << dendl;
+            pg->pool_migration_copied_clones[head].insert(oid);
+          } else {
+            // Head already fully committed to deletion; delete clone right away.
+            ldpp_dout(pg, 20) << "C_Migrate::finish head batch done, deleting late clone "
+                              << oid << " immediately" << dendl;
+            pg->pool_migration_source_start_delete(oid);
+          }
         } else {
-          ldpp_dout(pg, 20) << "C_Migrate::finish pool migration cannot delete " << head << " as clones still in flight" << dendl;
+          pg->pool_migration_copied_clones[head].insert(oid);
+          if (--pg->pool_migration_clones_in_flight[head] == 0) {
+            // All expected clones copied – start the batch delete (clones first,
+            // head last so the watermark advances only after every member of
+            // the group is gone from the source pool).
+            pg->pool_migration_source_start_delete_head(head);
+          } else {
+            ldpp_dout(pg, 20) << "C_Migrate::finish pool migration deferring delete of "
+                              << oid << " until all clones copied" << dendl;
+          }
         }
+      } else {
+        // Head without clones: delete immediately as before.
+        pg->pool_migration_source_start_delete(oid);
       }
     } else {
       // Head object is copied before clones, don't delete it until
@@ -15837,6 +15897,18 @@ void PrimaryLogPG::pool_migration_source_start_delete_head(hobject_t oid)
   ceph_assert(obc);
 
   pool_migration_clones_in_flight.erase(oid);
+
+  // Start deleting all deferred clone deletions first.  They were held back
+  // so the watermark would not advance until the whole object group (head +
+  // all clones) is removed in one pass.
+  auto it = pool_migration_copied_clones.find(oid);
+  if (it != pool_migration_copied_clones.end()) {
+    for (const auto &clone : it->second) {
+      pool_migration_source_start_delete(clone);
+    }
+    pool_migration_copied_clones.erase(it);
+  }
+
   start_recovery_op(oid);
   pool_migration_source_start_delete(oid);
 }
@@ -16024,6 +16096,7 @@ void PrimaryLogPG::handle_pool_migration_quiesce_complete()
   pool_migration_quiesce_error_code = 0;
   pool_migration_quiesce_last_started_reset = false;
   pool_migration_clones_in_flight.clear();
+  pool_migration_copied_clones.clear();
 
   if (reason == PoolMigrationQuiesceReason::RETRY_NEEDED) {
     // Retryable error - request new reservation and resume
@@ -16105,6 +16178,23 @@ bool PrimaryLogPG::handle_pool_migration_copy_failure(hobject_t oid, int r)
       finish_recovery_op(pending_oid);
       dout(20) << __func__ << " flushed pending delete for " << pending_oid << dendl;
     }
+
+    // Release any clones whose copies completed but whose source-pool deletions
+    // were deferred (batch delete).  Their copy callbacks have already returned
+    // so they will never call back here; without this, pool_migrations_in_flight
+    // would never reach empty and quiesce would stall.
+    for (auto &[head, done_clones] : pool_migration_copied_clones) {
+      for (const auto &done_clone : done_clones) {
+        pool_migrations_in_flight.erase(done_clone);
+        auto ri = recovering.find(done_clone);
+        if (ri != recovering.end()) {
+          recovering.erase(ri);
+          finish_recovery_op(done_clone);
+          dout(20) << __func__ << " releasing deferred-delete clone " << done_clone << dendl;
+        }
+      }
+    }
+    pool_migration_copied_clones.clear();
   } else {
     // Already quiescing - this is expected as in-flight operations drain
     // Check if we need to upgrade from retry to fatal error
@@ -16562,6 +16652,32 @@ void PrimaryLogPG::on_pool_migration_source_suspended()
              << " in-flight migrations to drain" << dendl;
     pool_migration_quiesce_reason = PoolMigrationQuiesceReason::SUSPEND_NEEDED;
     return;
+  }
+
+  // Migration is fully drained.  Re-queue any I/Os that were blocked waiting
+  // for objects to finish migrating so they can be served from the source pool
+  // (migration was suspended, not completed, so objects remain in source).
+  for (auto it = pool_migration_blocked_writes.begin();
+       it != pool_migration_blocked_writes.end();
+       it = pool_migration_blocked_writes.erase(it)) {
+    auto degraded_entry = waiting_for_degraded_object.find(*it);
+    if (degraded_entry != waiting_for_degraded_object.end()) {
+      dout(20) << __func__ << " re-queuing blocked write on " << *it << dendl;
+      requeue_ops(degraded_entry->second);
+      waiting_for_degraded_object.erase(degraded_entry);
+    }
+  }
+
+  // Re-queue any snap/clone I/Os that were waiting for head migration.
+  for (auto it = waiting_for_degraded_object.begin();
+       it != waiting_for_degraded_object.end(); ) {
+    if (it->first.is_snap()) {
+      dout(20) << __func__ << " re-queuing snap waiters on " << it->first << dendl;
+      requeue_ops(it->second);
+      it = waiting_for_degraded_object.erase(it);
+    } else {
+      ++it;
+    }
   }
 
   PG::on_pool_migration_source_suspended();

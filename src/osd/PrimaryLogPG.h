@@ -1210,6 +1210,8 @@ protected:
   std::set<hobject_t> pool_migration_blocked_writes;
   /// count of snaps being migrated per head object
   std::map<hobject_t,int> pool_migration_clones_in_flight;
+  /// clones for which copy has completed but source-pool deletion is deferred
+  std::map<hobject_t, std::set<hobject_t>> pool_migration_copied_clones;
   /// last pool migration operation started
   hobject_t last_pool_migration_started;
   /// set for 1st object migration after activate
